@@ -2,22 +2,17 @@ import requests
 import pandas as pd
 import smtplib
 from email.message import EmailMessage
-from datetime import datetime
-import os
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
 
 # ========== CONFIGURATION ==========
 
-MAX_RESULTS = 1000
 SMTP_SERVER = "smtp-mail.outlook.com"
 SMTP_PORT = 587
 EMAIL_SENDER = "network@clincoord.org"
 EMAIL_PASSWORD = "dcpcknbsykkhfcrb"
-EMAIL_RECEIVER = [
-    "rodrigo.lima.cc.ao@gmail.com"
-]
+EMAIL_RECEIVER = ["rodrigo.lima.cc.ao@gmail.com"]
 EMAIL_SUBJECT = "New Clinical Trials Found"
 XLSX_FILENAME = "clinical_trials_angola.xlsx"
 
@@ -28,29 +23,21 @@ def flatten_json(y, prefix=''):
     if isinstance(y, dict):
         for k, v in y.items():
             if k == 'locations' and isinstance(v, list):
+                locations_info = []
+                for loc in v:
+                    facility = loc.get('facility', 'N/A')
+                    city = loc.get('city', 'N/A')
+                    state = loc.get('state')
+                    country = loc.get('country', 'N/A')
+                    parts = [facility, city]
+                    if state:
+                        parts.append(state)
+                    parts.append(country)
+                    locations_info.append(", ".join(parts))
+                out[f"{prefix}combined_locations_string"] = "; ".join(locations_info)
+            elif k in ['centralContacts', 'overallOfficials'] and isinstance(v, list):
                 if v:
-                    locations_info = []
-                    for loc in v:
-                        facility = loc.get('facility', 'N/A')
-                        city = loc.get('city', 'N/A')
-                        state = loc.get('state', None)
-                        country = loc.get('country', 'N/A')
-                        location_str = f"{facility}, {city}"
-                        if state:
-                            location_str += f", {state}"
-                        location_str += f", {country}"
-                        locations_info.append(location_str)
-                    out[f"{prefix}combined_locations_string"] = "; ".join(locations_info)
-                else:
-                    out[f"{prefix}combined_locations_string"] = ""
-            elif k == 'centralContacts' and isinstance(v, list):
-                if v:
-                    first_contact = v[0]
-                    out.update(flatten_json(first_contact, f"{prefix}{k}.0."))
-            elif k == 'overallOfficials' and isinstance(v, list):
-                if v:
-                    first_official = v[0]
-                    out.update(flatten_json(first_official, f"{prefix}{k}.0."))
+                    out.update(flatten_json(v[0], f"{prefix}{k}.0."))
             else:
                 out.update(flatten_json(v, f"{prefix}{k}."))
     elif isinstance(y, list):
@@ -63,87 +50,85 @@ def flatten_json(y, prefix=''):
         out[prefix[:-1]] = y
     return out
 
-# ========== SCRAPE FUNCTION ==========
+# ========== SCRAPE FUNCTION WITH GENERATOR ==========
 
-def scrape_clinicaltrials_gov_api(max_results=1000):
+def scrape_clinicaltrials_gov_api():
     url = "https://clinicaltrials.gov/api/v2/studies"
-    params = {"pageSize": max_results}
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, params=params)
+    page_token = None
+    page_num = 1
 
-    if response.status_code != 200:
-        print(f"Failed to fetch data: HTTP {response.status_code}")
-        return []
+    while True:
+        params = {"pageSize": 1000}
+        if page_token:
+            params["pageToken"] = page_token
 
-    try:
-        data = response.json()
-    except ValueError:
-        print("Failed to decode JSON response.")
-        return []
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            print(f"Erro na página {page_num}: {e}")
+            break
 
-    trials = []
-    for study in data.get("studies", []):
-        flat_study = flatten_json(study)
-        trials.append(flat_study)
-    return trials
+        studies = data.get("studies", [])
+        if not studies:
+            break
 
-# ========== EXCEL FORMATTING FUNCTION ==========
+        for study in studies:
+            yield flatten_json(study)
+
+        print(f"Página {page_num}: {len(studies)} estudos processados.")
+        page_num += 1
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+# ========== EXCEL FORMATTER ==========
 
 def format_excel(filename):
     try:
-        workbook = load_workbook(filename)
-        sheet = workbook.active
+        wb = load_workbook(filename)
+        ws = wb.active
 
-        for column in sheet.columns:
-            max_length = 0
-            column_letter = get_column_letter(column[0].column)
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except TypeError:
-                    pass
-            adjusted_width = (max_length + 2)
-            if adjusted_width > 100:
-                adjusted_width = 100
-            sheet.column_dimensions[column_letter].width = adjusted_width
+        for col in ws.columns:
+            max_len = max((len(str(cell.value)) if cell.value else 0) for cell in col)
+            max_len = min(max_len + 2, 100)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max_len
 
-        sheet.freeze_panes = sheet['A2']
-        sheet.auto_filter.ref = sheet.dimensions
+        ws.freeze_panes = ws['A2']
+        ws.auto_filter.ref = ws.dimensions
 
-        # Torna o link clicável e azul sublinhado
-        link_col_idx = None
-        for idx, cell in enumerate(sheet[1], start=1):
+        for idx, cell in enumerate(ws[1], start=1):
             if cell.value == "Trial Link":
-                link_col_idx = idx
+                for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+                    cell = row[0]
+                    if cell.value:
+                        cell.hyperlink = cell.value
+                        cell.font = Font(color="0000FF", underline="single")
                 break
 
-        if link_col_idx:
-            for row in sheet.iter_rows(min_row=2, min_col=link_col_idx, max_col=link_col_idx):
-                cell = row[0]
-                if cell.value:
-                    cell.hyperlink = cell.value
-                    cell.font = Font(color="0000FF", underline="single")
-
-        workbook.save(filename)
-        print(f"Excel file '{filename}' formatted successfully.")
+        wb.save(filename)
+        print(f"Arquivo Excel '{filename}' formatado.")
     except Exception as e:
-        print(f"Error formatting Excel file: {e}")
+        print(f"Erro ao formatar Excel: {e}")
 
-# ========== EMAIL FUNCTION ==========
+# ========== EMAIL ==========
 
-def send_email(trials_to_send):
+def send_email(trials_count):
     msg = EmailMessage()
     msg['Subject'] = EMAIL_SUBJECT
     msg['From'] = EMAIL_SENDER
     msg['To'] = ", ".join(EMAIL_RECEIVER)
 
-    if trials_to_send:
+    if trials_count > 0:
         html = f"""
         <html>
         <body>
             <h2>Novos Ensaios Clínicos Encontrados</h2>
-            <p>{len(trials_to_send)} novo(s) ensaio(s) clínico(s) foi(ram) encontrado(s) e salvo(s) no Excel.</p>
+            <p>{trials_count} novo(s) ensaio(s) clínico(s) foi(ram) encontrado(s) e salvo(s) no Excel.</p>
         </body>
         </html>
         """
@@ -157,99 +142,63 @@ def send_email(trials_to_send):
         </html>
         """
 
-    msg.set_content("Este email contém conteúdo HTML. Por favor, visualize-o em um cliente de email compatível com HTML.")
+    msg.set_content("Este email contém conteúdo HTML.")
     msg.add_alternative(html, subtype='html')
 
-    if trials_to_send:
-        try:
-            with open(XLSX_FILENAME, "rb") as f:
-                msg.add_attachment(
-                    f.read(),
-                    maintype="application",
-                    subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    filename=XLSX_FILENAME
-                )
-        except FileNotFoundError:
-            print(f"Erro: O arquivo Excel '{XLSX_FILENAME}' não foi encontrado. Não é possível anexá-lo ao email.")
-    
+    if trials_count > 0:
+        with open(XLSX_FILENAME, "rb") as f:
+            msg.add_attachment(f.read(), maintype="application",
+                               subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               filename=XLSX_FILENAME)
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
             smtp.starttls()
             smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
             smtp.send_message(msg)
             print("Email enviado com sucesso.")
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"Erro de Autenticação SMTP: {e}. Verifique o remetente e a senha do seu email.")
-    except smtplib.SMTPException as e:
-        print(f"Erro SMTP: {e}. Não foi possível enviar o email.")
     except Exception as e:
-        print(f"Ocorreu um erro inesperado ao enviar o email: {e}")
+        print(f"Erro ao enviar email: {e}")
 
-# ========== MAIN FUNCTION ==========
+# ========== MAIN ==========
 
 def main():
-    trials = scrape_clinicaltrials_gov_api(MAX_RESULTS)
+    columns_map = {
+        "protocolSection.identificationModule.nctId": "Trial Registry Number (.gov)",
+        "protocolSection.sponsorCollaboratorsModule.leadSponsor.name": "Sponsor Name",
+        "protocolSection.sponsorCollaboratorsModule.leadSponsor.class": "Sponsor Type",
+        "protocolSection.contactsLocationsModule.centralContacts.0.name": "Contact Person",
+        "protocolSection.contactsLocationsModule.centralContacts.0.role": "Role",
+        "protocolSection.contactsLocationsModule.centralContacts.0.phone": "Phone Number",
+        "protocolSection.contactsLocationsModule.centralContacts.0.email": "Email",
+        "protocolSection.identificationModule.briefTitle": "Trial Name",
+        "protocolSection.identificationModule.officialTitle": "Trial/Project Title",
+        "protocolSection.designModule.phases": "Trial Phase",
+        "protocolSection.statusModule.overallStatus": "Trial Status",
+        "protocolSection.conditionsModule.conditions": "Therapeutic Area/Research Category",
+        "protocolSection.armsInterventionsModule.interventions.0.name": "Intervention/Investigational Product",
+        "protocolSection.statusModule.startDateStruct.date": "Trial Start Date",
+        "protocolSection.statusModule.completionDateStruct.date": "Trial End Date",
+        "protocolSection.contactsLocationsModule.combined_locations_string": "Location"
+    }
 
-    if trials:
-        df = pd.DataFrame(trials)
+    rows = []
+    for flat_study in scrape_clinicaltrials_gov_api():
+        row = {v: flat_study.get(k, "") for k, v in columns_map.items()}
+        nct = flat_study.get("protocolSection.identificationModule.nctId", "")
+        row["Trial Link"] = f"https://clinicaltrials.gov/study/{nct}" if nct else ""
+        rows.append(row)
 
-        columns_map = {
-            "protocolSection.identificationModule.nctId": "Trial Registry Number (.gov)",
-            "protocolSection.sponsorCollaboratorsModule.leadSponsor.name": "Sponsor Name",
-            "protocolSection.sponsorCollaboratorsModule.leadSponsor.class": "Sponsor Type",
-            "protocolSection.contactsLocationsModule.centralContacts.0.name": "Contact Person",
-            "protocolSection.contactsLocationsModule.centralContacts.0.role": "Role",
-            "protocolSection.contactsLocationsModule.centralContacts.0.phone": "Phone Number",
-            "protocolSection.contactsLocationsModule.centralContacts.0.email": "Email",
-            "protocolSection.identificationModule.briefTitle": "Trial Name",
-            "protocolSection.identificationModule.officialTitle": "Trial/Project Title",
-            "protocolSection.designModule.phases": "Trial Phase",
-            "protocolSection.statusModule.overallStatus": "Trial Status",
-            "protocolSection.conditionsModule.conditions": "Therapeutic Area/Research Category",
-            "protocolSection.armsInterventionsModule.interventions.0.name": "Intervention/Investigational Product",
-            "protocolSection.statusModule.startDateStruct.date": "Trial Start Date",
-            "protocolSection.statusModule.completionDateStruct.date": "Trial End Date",
-            "protocolSection.contactsLocationsModule.combined_locations_string": "Location"
-        }
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df[df["Trial Status"].isin(["RECRUITING", "NOT_YET_RECRUITING"])]
+        print(f"{len(df)} trials válidos encontrados.")
 
-        if "protocolSection.identificationModule.nctId" in df.columns:
-            df["Trial Link"] = df["protocolSection.identificationModule.nctId"].apply(
-                lambda nct: f"https://clinicaltrials.gov/study/{nct}" if pd.notnull(nct) else ""
-            )
-        else:
-            df["Trial Link"] = ""
-
-        df_filtered = pd.DataFrame()
-        for api_key, friendly_name in columns_map.items():
-            if api_key in df.columns:
-                df_filtered[friendly_name] = df[api_key]
-            else:
-                df_filtered[friendly_name] = ""
-
-        df_filtered["Trial Link"] = df["Trial Link"]
-
-        allowed_statuses = ["RECRUITING", "NOT_YET_RECRUITING"]
-        if "Trial Status" in df_filtered.columns:
-            df_filtered = df_filtered[df_filtered["Trial Status"].isin(allowed_statuses)].copy()
-            print(f"Filtered to {len(df_filtered)} trials with status 'RECRUITING' or 'NOT_YET_RECRUITING'.")
-        else:
-            print("Warning: 'Trial Status' column not found for filtering.")
-
-        desired_order = list(columns_map.values()) + ["Trial Link"]
-        for col in desired_order:
-            if col not in df_filtered.columns:
-                df_filtered[col] = ""
-
-        df_final = df_filtered[desired_order]
-
-        df_final.to_excel(XLSX_FILENAME, index=False)
-        print(f"{len(df_final)} trials saved to '{XLSX_FILENAME}'.")
-
+        df.to_excel(XLSX_FILENAME, index=False)
         format_excel(XLSX_FILENAME)
-        send_email(df_final.to_dict('records'))
+        send_email(len(df))
     else:
-        send_email([])
-        print("No trials found from API call.")
+        print("Nenhum estudo retornado.")
+        send_email(0)
 
 if __name__ == "__main__":
-    main() 
+    main()
