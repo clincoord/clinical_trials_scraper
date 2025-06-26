@@ -11,7 +11,7 @@ from openpyxl.styles import Font
 SMTP_SERVER = "smtp-mail.outlook.com"
 SMTP_PORT = 587
 EMAIL_SENDER = "network@clincoord.org"
-EMAIL_PASSWORD = "dcpcknbsykkhfcrb"
+EMAIL_PASSWORD = ""
 EMAIL_RECEIVER = ["rodrigo.lima.cc.ao@gmail.com"]
 EMAIL_SUBJECT = "New Clinical Trials Found"
 XLSX_FILENAME = "clinical_trials_angola.xlsx"
