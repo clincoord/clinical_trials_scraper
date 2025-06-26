@@ -240,7 +240,7 @@ def main():
             if col not in df_filtered.columns:
                 df_filtered[col] = ""
 
-        df_final = df_filtered  esired_order]
+        df_final = df_filtered[desired_order]
 
         df_final.to_excel(XLSX_FILENAME, index=False)
         print(f"{len(df_final)} trials saved to '{XLSX_FILENAME}'.")
