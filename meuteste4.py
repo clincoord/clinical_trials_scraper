@@ -252,4 +252,4 @@ def main():
         print("No trials found from API call.")
 
 if __name__ == "__main__":
-    main()
+    main() 
